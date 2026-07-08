@@ -35,7 +35,7 @@ PATCHES = {
     "0001-bindgen-disable-layout-tests.patch": textwrap.dedent("""\
         --- a/bch_bindgen/build.rs
         +++ b/bch_bindgen/build.rs
-        @@ -423,7 +423,7 @@
+        @@ -442,7 +442,7 @@
                  .clang_arg("-fkeep-inline-functions")
                  .derive_debug(true)
                  .derive_default(true)
@@ -48,7 +48,7 @@ PATCHES = {
     "0002-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
         --- a/src/copy_fs.rs
         +++ b/src/copy_fs.rs
-        @@ -298,9 +298,9 @@
+        @@ -300,9 +300,9 @@
          }
          
          fn copy_times(fs: &Fs, dst: &mut c::bch_inode_unpacked, src: &rustix::fs::Stat) {
@@ -66,7 +66,7 @@ PATCHES = {
     "0003-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
         --- a/src/wrappers/bdev.rs
         +++ b/src/wrappers/bdev.rs
-        @@ -26,7 +26,11 @@
+        @@ -36,7 +36,11 @@
              target_arch = "sparc",
              target_arch = "sparc64",
          )))]
@@ -82,7 +82,7 @@ PATCHES = {
     "0004-write-buffer-smp-arm32.patch": textwrap.dedent("""\
         --- a/fs/btree/write_buffer.c
         +++ b/fs/btree/write_buffer.c
-        @@ -453,7 +453,7 @@
+        @@ -976,7 +976,7 @@
          	u64 inc = READ_ONCE(wb->inc.pin.seq);
          	smp_rmb();
          #else
@@ -94,7 +94,7 @@ PATCHES = {
     "0005-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
         --- a/fs/errcode.c
         +++ b/fs/errcode.c
-        @@ -107,3 +107,26 @@
+        @@ -117,3 +117,26 @@
          	trace_error_throw(c, bch2_err_str(err));
          	return err;
          }
@@ -124,10 +124,8 @@ PATCHES = {
         +#endif
         --- a/fs/bcachefs.h
         +++ b/fs/bcachefs.h
-        @@ -1186,4 +1186,26 @@
-         #define class_bch_log_msg_ratelimited_constructor(_c)		\\
-         	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
-         
+        @@ -1066 +1066,26 @@
+        -#endif /* _BCACHEFS_H */
         +#ifdef CONFIG_ARM
         +#include <asm/cmpxchg.h>
         +
@@ -153,23 +151,19 @@ PATCHES = {
         +	__ret; \\
         +})
         +#endif
-         #endif /* _BCACHEFS_H */
+        +#endif /* _BCACHEFS_H */
     """),
-    # NEW PATCH: fix __int128 unsupported on armhf
+    # NEW PATCH: fix __int128 unsupported on armhf - corrected for actual kernel.h
     "0006-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
         +++ b/include/linux/kernel.h
-        @@ -52,7 +52,9 @@
-         #define __round_mask(x, y) ((__typeof__(x))((y)-1))
-         #define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
-         #define round_down(x, y) ((x) & ~__round_mask(x, y))
+        @@ -54,4 +54,6 @@ typedef __u64 u64;
+         typedef __s64 s64;
         -typedef unsigned __int128 u128;
         +#ifdef __SIZEOF_INT128__
         +typedef unsigned __int128 u128;
         +#endif
-         
-         #define GENMASK(h, l) \
-              (((~0UL) - (1UL << (l)) + 1) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
+         typedef __u32 u32;
     """),
 }
 
