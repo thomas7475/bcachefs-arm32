@@ -23,7 +23,7 @@ WORK_DIR = "bcachefs-tools"
 
 REQUIRED_TOOLS = [
     "git", "cargo", "dpkg-buildpackage", "dh",
-    "rustc", "bindgen", "dch", "patch"
+    "rustc", "bindgen", "dch", "patch", "quilt"
 ]
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,7 @@ PATCHES = {
         +#endif
         --- a/fs/bcachefs.h
         +++ b/fs/bcachefs.h
-        @@ -1186,4 +1186,27 @@
+        @@ -1186,4 +1186,26 @@
          #define class_bch_log_msg_ratelimited_constructor(_c)		\\
          	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
          
@@ -153,7 +153,6 @@ PATCHES = {
         +	__ret; \\
         +})
         +#endif
-        +
          #endif /* _BCACHEFS_H */
     """),
     # NEW PATCH: fix __int128 unsupported on armhf
@@ -190,6 +189,17 @@ def check_required_tools():
             print(f"    • {t}")
         sys.exit(1)
 
+def get_current_epoch(work_dir):
+    changelog = os.path.join(work_dir, "debian", "changelog")
+    if not os.path.exists(changelog):
+        return ""
+    with open(changelog) as f:
+        first = f.readline()
+    m = re.match(r"^\S+\s+\(([^)]+)\)", first)
+    if m and ":" in m.group(1):
+        return m.group(1).split(":", 1)[0] + ":"
+    return ""
+
 def apply_quilt_patches(work_dir):
     """Writes the patches to debian/patches/ so dpkg applies them safely."""
     patch_dir = os.path.join(work_dir, "debian", "patches")
@@ -206,10 +216,20 @@ def apply_quilt_patches(work_dir):
         print(f"    -> Added {patch_name}")
         
     series_path = os.path.join(patch_dir, "series")
-    with open(series_path, "a") as f:
+    # Overwrite series file to avoid duplicates
+    with open(series_path, "w") as f:
         f.write("\n".join(series_lines) + "\n")
 
+def apply_quilt_patches_manually(work_dir):
+    """Apply all patches using quilt."""
+    print("[*] Applying Quilt patches...")
+    env = os.environ.copy()
+    env["QUILT_PATCHES"] = "debian/patches"
+    run_cmd(["quilt", "push", "-a"], cwd=work_dir, env=env)
+
 def configure_debian_metadata(work_dir, version_str):
+    epoch = get_current_epoch(work_dir)
+    full_version = f"{epoch}{version_str}-1"
     """Prepare Debian files (Dependencies, Rules, and proper Changelog via dch)."""
     
     # 1. Update Changelog dynamically via debian tooling (dch)
@@ -220,8 +240,7 @@ def configure_debian_metadata(work_dir, version_str):
     env["DEBFULLNAME"] = "BBB Builder"
 
     run_cmd([
-        "dch", "-b",
-        "--newversion", f"{version_str}-1", 
+        "dch", "-v", full_version,
         "--distribution", "unstable",
         "--urgency", "high",
         "Automated native armhf compatibility build."
@@ -320,6 +339,8 @@ def main():
 
     # Configure the build environment properly using patches and debscripts
     apply_quilt_patches(WORK_DIR)
+    apply_quilt_patches_manually(WORK_DIR)   # apply them now
+
     configure_debian_metadata(WORK_DIR, version_str)
     setup_cargo_vendor(WORK_DIR, version_str)
 
