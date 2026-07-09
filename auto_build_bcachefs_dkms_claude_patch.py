@@ -40,7 +40,7 @@ PATCHES = {
                  .derive_debug(true)
                  .derive_default(true)
         -        .layout_tests(true)
-        +        .layout_tests(false)
+        +        .layout_tests(true)
                  .default_enum_style(bindgen::EnumVariation::Rust {
                      non_exhaustive: true,
                  })
@@ -48,12 +48,10 @@ PATCHES = {
     "0002-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
         --- a/src/copy_fs.rs
         +++ b/src/copy_fs.rs
-        @@ -300,9 +300,9 @@
-         }
+        @@ -298,9 +298,9 @@
          
          fn copy_times(fs: &Fs, dst: &mut c::bch_inode_unpacked, src: &rustix::fs::Stat) {
-        -    let make_ts = |sec, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
-        +    let make_ts = |sec: i64, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
+             let make_ts = |sec, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
          
         -    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime, src.st_atime_nsec as _)) as u64;
         -    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime, src.st_mtime_nsec as _)) as u64;
@@ -94,7 +92,7 @@ PATCHES = {
     "0005-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
         --- a/fs/errcode.c
         +++ b/fs/errcode.c
-        @@ -117,3 +117,26 @@
+        @@ -117,3 +117,27 @@
          	trace_error_throw(c, bch2_err_str(err));
          	return err;
          }
