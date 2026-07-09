@@ -261,6 +261,9 @@ def configure_debian_metadata(work_dir, version_str):
                 "\tmkdir -p debian/tmp/usr/share/bash-completion/completions\n"
                 "\ttouch debian/tmp/usr/share/bash-completion/completions/bcachefs\n"
                 "\tdh_install\n"
+                "\noverride_dh_link:\n"
+                "\tdh_link\n"
+                "\tdh_link usr/sbin/bcachefs usr/bin/bcachefs\n"
             )
 
 def setup_cargo_vendor(work_dir, version_str):
