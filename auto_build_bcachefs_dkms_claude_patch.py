@@ -32,32 +32,11 @@ REQUIRED_TOOLS = [
 # automatically via quilt.
 # ---------------------------------------------------------------------------
 PATCHES = {
-    # PATCH 1: Copy_fs Timestamps Cast
-    # The Linux Kernel uses a generic 'stat' struct. On 32-bit kernels (like the BBB), 
-    # time variables (st_atime) are defined as 32-bit signed integers (i32).
-    # Rust expects 64-bit integers. We use 'as _' to let the compiler safely cast 
-    # the 32-bit kernel values into the 64-bit Bcachefs time specifications natively.
-    "0001-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
-        --- a/src/copy_fs.rs
-        +++ b/src/copy_fs.rs
-        @@ -298,9 +298,9 @@
-         
-         fn copy_times(fs: &Fs, dst: &mut c::bch_inode_unpacked, src: &rustix::fs::Stat) {
-             let make_ts = |sec, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
-         
-        -    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime, src.st_atime_nsec as _)) as u64;
-        -    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime, src.st_mtime_nsec as _)) as u64;
-        -    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime, src.st_ctime_nsec as _)) as u64;
-        +    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime as _, src.st_atime_nsec as _)) as u64;
-        +    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime as _, src.st_mtime_nsec as _)) as u64;
-        +    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime as _, src.st_ctime_nsec as _)) as u64;
-         }
-    """),
-    # PATCH 2: 32-bit Block Device IOCTLs
+    # PATCH 1: 32-bit Block Device IOCTLs
     # Replaces the hardcoded 64-bit hex IOCTL block check with libc's native binding. 
     # The libc crate automatically identifies the correct IOCTL signature (4-byte vs 8-byte 
     # size pointer offsets) depending on arm32 vs arm64 targets.
-    "0002-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
+    "0001-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
         --- a/src/wrappers/bdev.rs
         +++ b/src/wrappers/bdev.rs
         @@ -36,7 +36,7 @@
@@ -69,11 +48,11 @@ PATCHES = {
          
          /// Returns the size of a file or block device in bytes.
     """),
-    # PATCH 3: Route 64-bit write buffer logic into native 32-bit fallback 
+    # PATCH 2: Route 64-bit write buffer logic into native 32-bit fallback 
     # Bcachefs explicitly wrote a 32-bit handler because 32-bit single-instruction
     # atomics (`smp_load_acquire`) don't exist, but it triggers it based on a Kernel 
     # macro that userspace compilers frequently miss. Checking GCC's size solves this cleanly.
-    "0003-write-buffer-smp-arm32.patch": textwrap.dedent("""\
+    "0002-write-buffer-smp-arm32.patch": textwrap.dedent("""\
         --- a/fs/btree/write_buffer.c
         +++ b/fs/btree/write_buffer.c
         @@ -974,7 +974,7 @@
@@ -86,13 +65,13 @@ PATCHES = {
          	smp_rmb();
          #else
     """),
-    # PATCH 4: ARM32 DKMS Module Math and Compare-and-Swap
+    # PATCH 3: ARM32 DKMS Module Math and Compare-and-Swap
     # (Note: Left exactly as-is to preserve minimal intrusion over kernel imports).
     # When compiling as a standalone DKMS Kernel Module on ARM32, 64-bit divisions emit 
     # '__aeabi_uldivmod', which the Linux Kernel refuses to link against. We inject a naked 
     # assembly function to catch these calls and route them safely to Linux's internal math 
     # (div64_u64). We also manually map 'cmpxchg' 64-bit calls to the kernel's 'cmpxchg64'.
-    "0004-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
+    "0003-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
         --- a/fs/errcode.c
         +++ b/fs/errcode.c
         @@ -117,3 +117,27 @@
@@ -157,11 +136,11 @@ PATCHES = {
         +
          #endif /* _BCACHEFS_H */
     """),
-    # PATCH 5: GCC Missing 128-bit support on 32-bit systems
+    # PATCH 4: GCC Missing 128-bit support on 32-bit systems
     # 32-bit GCC entirely lacks support for the primitive compiler flag `__int128`.
     # This wraps it behind standard #ifdef SIZEOF macros, falling back 
     # to a basic struct so parsing headers doesn't instantly panic the compiler.
-    "0005-conditional-__int128.patch": textwrap.dedent("""\
+    "0004-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
         +++ b/include/linux/kernel.h
         @@ -54,4 +54,6 @@ typedef __u64 u64;
@@ -355,8 +334,9 @@ def main():
     
     # Silence third-party Rust dependency warnings
     env["RUSTFLAGS"] = "-A unexpected_cfgs -A unused_qualifications"
-    # Silence the ARM32 GCC ABI warnings
-    env["CFLAGS"] = "-Wno-psabi"
+    # Provide the 64-bit time/offset ABI to GCC and Bindgen natively
+    env["CFLAGS"] = "-Wno-psabi -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
+    env["BINDGEN_EXTRA_CLANG_ARGS"] = "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
     
     run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b"], cwd=WORK_DIR, env=env)
 
