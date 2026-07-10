@@ -32,30 +32,12 @@ REQUIRED_TOOLS = [
 # automatically via quilt.
 # ---------------------------------------------------------------------------
 PATCHES = {
-    # PATCH 1: Bindgen Layout Tests
-    # bch_bindgen translates C structures into Rust. It generates layout tests to 
-    # check that sizes align exactly. On 32-bit ARM, natural struct padding 
-    # differences between C and Rust causes these tests to falsely fail. We disable 
-    # the layout tests to allow compilation to proceed.
-    "0001-bindgen-disable-layout-tests.patch": textwrap.dedent("""\
-        --- a/bch_bindgen/build.rs
-        +++ b/bch_bindgen/build.rs
-        @@ -442,7 +442,7 @@
-                 .clang_arg("-fkeep-inline-functions")
-                 .derive_debug(true)
-                 .derive_default(true)
-        -        .layout_tests(true)
-        +        .layout_tests(true)
-                 .default_enum_style(bindgen::EnumVariation::Rust {
-                     non_exhaustive: true,
-                 })
-    """),
-    # PATCH 2: Copy_fs Timestamps Cast
+    # PATCH 1: Copy_fs Timestamps Cast
     # The Linux Kernel uses a generic 'stat' struct. On 32-bit kernels (like the BBB), 
     # time variables (st_atime) are defined as 32-bit signed integers (i32).
     # Rust expects 64-bit integers. We use 'as _' to let the compiler safely cast 
     # the 32-bit kernel values into the 64-bit Bcachefs time specifications natively.
-    "0002-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
+    "0001-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
         --- a/src/copy_fs.rs
         +++ b/src/copy_fs.rs
         @@ -298,9 +298,9 @@
@@ -71,49 +53,46 @@ PATCHES = {
         +    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime as _, src.st_ctime_nsec as _)) as u64;
          }
     """),
-    # PATCH 3: 32-bit Block Device IOCTLs
-    # When asking Linux for a device size (BLKGETSIZE64), the hex command code is 
-    # dynamically generated based on the architecture's memory pointer size.
-    # Bcachefs hardcoded the 64-bit value. This injects logic to fall back to the 
-    # 32-bit command code (0x80041272) when compiling on ARM32.
-    "0003-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
+    # PATCH 2: 32-bit Block Device IOCTLs
+    # Replaces the hardcoded 64-bit hex IOCTL block check with libc's native binding. 
+    # The libc crate automatically identifies the correct IOCTL signature (4-byte vs 8-byte 
+    # size pointer offsets) depending on arm32 vs arm64 targets.
+    "0002-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
         --- a/src/wrappers/bdev.rs
         +++ b/src/wrappers/bdev.rs
-        @@ -36,7 +36,11 @@
+        @@ -36,7 +36,7 @@
              target_arch = "sparc",
              target_arch = "sparc64",
          )))]
         -const BLKGETSIZE64: libc::Ioctl = 0x80081272u32 as libc::Ioctl;
-        +const BLKGETSIZE64: libc::Ioctl = if cfg!(target_pointer_width = "32") {
-        +    0x80041272u32 as libc::Ioctl
-        +} else {
-        +    0x80081272u32 as libc::Ioctl
-        +};
+        +const BLKGETSIZE64: libc::Ioctl = libc::BLKGETSIZE64 as libc::Ioctl;
          
          /// Returns the size of a file or block device in bytes.
     """),
-    # PATCH 4: 64-bit Atomic Variable Missing Function
-    # 32-bit CPUs do not have single-instruction 64-bit read-and-lock memory accesses
-    # (smp_load_acquire). If we try to compile it, the linker will panic.
-    # This falls back to doing a safe read and triggering a manual memory barrier (smp_mb).
-    "0004-write-buffer-smp-arm32.patch": textwrap.dedent("""\
+    # PATCH 3: Route 64-bit write buffer logic into native 32-bit fallback 
+    # Bcachefs explicitly wrote a 32-bit handler because 32-bit single-instruction
+    # atomics (`smp_load_acquire`) don't exist, but it triggers it based on a Kernel 
+    # macro that userspace compilers frequently miss. Checking GCC's size solves this cleanly.
+    "0003-write-buffer-smp-arm32.patch": textwrap.dedent("""\
         --- a/fs/btree/write_buffer.c
         +++ b/fs/btree/write_buffer.c
-        @@ -976,7 +976,7 @@
+        @@ -974,7 +974,7 @@
+         	 * half loads are sufficient here; torn reads may only make us think
+         	 * there is still work to do.
+         	 */
+        -#if BITS_PER_LONG == 32
+        +#if (defined(BITS_PER_LONG) && BITS_PER_LONG == 32) || __SIZEOF_LONG__ == 4
          	u64 inc = READ_ONCE(wb->inc.pin.seq);
          	smp_rmb();
          #else
-        -	u64 inc = smp_load_acquire(&wb->inc.pin.seq);
-        +	u64 inc = ({ u64 _v = READ_ONCE(wb->inc.pin.seq); smp_mb(); _v; });
-         #endif
-         	u64 flushing = READ_ONCE(wb->flushing.pin.seq);
     """),
-    # PATCH 5: ARM32 DKMS Module Math and Compare-and-Swap
+    # PATCH 4: ARM32 DKMS Module Math and Compare-and-Swap
+    # (Note: Left exactly as-is to preserve minimal intrusion over kernel imports).
     # When compiling as a standalone DKMS Kernel Module on ARM32, 64-bit divisions emit 
     # '__aeabi_uldivmod', which the Linux Kernel refuses to link against. We inject a naked 
     # assembly function to catch these calls and route them safely to Linux's internal math 
     # (div64_u64). We also manually map 'cmpxchg' 64-bit calls to the kernel's 'cmpxchg64'.
-    "0005-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
+    "0004-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
         --- a/fs/errcode.c
         +++ b/fs/errcode.c
         @@ -117,3 +117,27 @@
@@ -178,12 +157,11 @@ PATCHES = {
         +
          #endif /* _BCACHEFS_H */
     """),
-    # PATCH 6: GCC Missing 128-bit support on 32-bit systems
+    # PATCH 5: GCC Missing 128-bit support on 32-bit systems
     # 32-bit GCC entirely lacks support for the primitive compiler flag `__int128`.
     # This wraps it behind standard #ifdef SIZEOF macros, falling back 
     # to a basic struct so parsing headers doesn't instantly panic the compiler.
-    # NEW PATCH: fix __int128 unsupported on armhf - corrected for actual kernel.h
-    "0006-conditional-__int128.patch": textwrap.dedent("""\
+    "0005-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
         +++ b/include/linux/kernel.h
         @@ -54,4 +54,6 @@ typedef __u64 u64;
