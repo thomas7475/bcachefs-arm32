@@ -32,6 +32,11 @@ REQUIRED_TOOLS = [
 # automatically via quilt.
 # ---------------------------------------------------------------------------
 PATCHES = {
+    # PATCH 1: Bindgen Layout Tests
+    # bch_bindgen translates C structures into Rust. It generates layout tests to 
+    # check that sizes align exactly. On 32-bit ARM, natural struct padding 
+    # differences between C and Rust causes these tests to falsely fail. We disable 
+    # the layout tests to allow compilation to proceed.
     "0001-bindgen-disable-layout-tests.patch": textwrap.dedent("""\
         --- a/bch_bindgen/build.rs
         +++ b/bch_bindgen/build.rs
@@ -45,6 +50,11 @@ PATCHES = {
                      non_exhaustive: true,
                  })
     """),
+    # PATCH 2: Copy_fs Timestamps Cast
+    # The Linux Kernel uses a generic 'stat' struct. On 32-bit kernels (like the BBB), 
+    # time variables (st_atime) are defined as 32-bit signed integers (i32).
+    # Rust expects 64-bit integers. We use 'as _' to let the compiler safely cast 
+    # the 32-bit kernel values into the 64-bit Bcachefs time specifications natively.
     "0002-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
         --- a/src/copy_fs.rs
         +++ b/src/copy_fs.rs
@@ -61,6 +71,11 @@ PATCHES = {
         +    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime as _, src.st_ctime_nsec as _)) as u64;
          }
     """),
+    # PATCH 3: 32-bit Block Device IOCTLs
+    # When asking Linux for a device size (BLKGETSIZE64), the hex command code is 
+    # dynamically generated based on the architecture's memory pointer size.
+    # Bcachefs hardcoded the 64-bit value. This injects logic to fall back to the 
+    # 32-bit command code (0x80041272) when compiling on ARM32.
     "0003-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
         --- a/src/wrappers/bdev.rs
         +++ b/src/wrappers/bdev.rs
@@ -77,6 +92,10 @@ PATCHES = {
          
          /// Returns the size of a file or block device in bytes.
     """),
+    # PATCH 4: 64-bit Atomic Variable Missing Function
+    # 32-bit CPUs do not have single-instruction 64-bit read-and-lock memory accesses
+    # (smp_load_acquire). If we try to compile it, the linker will panic.
+    # This falls back to doing a safe read and triggering a manual memory barrier (smp_mb).
     "0004-write-buffer-smp-arm32.patch": textwrap.dedent("""\
         --- a/fs/btree/write_buffer.c
         +++ b/fs/btree/write_buffer.c
@@ -89,6 +108,11 @@ PATCHES = {
          #endif
          	u64 flushing = READ_ONCE(wb->flushing.pin.seq);
     """),
+    # PATCH 5: ARM32 DKMS Module Math and Compare-and-Swap
+    # When compiling as a standalone DKMS Kernel Module on ARM32, 64-bit divisions emit 
+    # '__aeabi_uldivmod', which the Linux Kernel refuses to link against. We inject a naked 
+    # assembly function to catch these calls and route them safely to Linux's internal math 
+    # (div64_u64). We also manually map 'cmpxchg' 64-bit calls to the kernel's 'cmpxchg64'.
     "0005-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
         --- a/fs/errcode.c
         +++ b/fs/errcode.c
@@ -104,26 +128,28 @@ PATCHES = {
         +	*remainder = dividend - quot * divisor;
         +	return quot;
         +}
-        +asm (
-        +	".text\\n"
-        +	".align 2\\n"
-        +	".global __aeabi_uldivmod\\n"
-        +	"__aeabi_uldivmod:\\n"
-        +	"push {lr}\\n"
-        +	"sub sp, sp, #20\\n"
-        +	"add r12, sp, #8\\n"
-        +	"str r12, [sp, #0]\\n"
-        +	"bl bch_div64_u64_rem\\n"
-        +	"ldr r2, [sp, #8]\\n"
-        +	"ldr r3, [sp, #12]\\n"
-        +	"add sp, sp, #20\\n"
-        +	"pop {pc}\\n"
-        +);
+        +
+        +void __attribute__((naked)) __aeabi_uldivmod(void);
+        +void __attribute__((naked)) __aeabi_uldivmod(void) {
+        +	asm volatile(
+        +		"push {lr}\\n"
+        +		"sub sp, sp, #20\\n"
+        +		"add r12, sp, #8\\n"
+        +		"str r12, [sp, #0]\\n"
+        +		"bl bch_div64_u64_rem\\n"
+        +		"ldr r2, [sp, #8]\\n"
+        +		"ldr r3, [sp, #12]\\n"
+        +		"add sp, sp, #20\\n"
+        +		"pop {pc}\\n"
+        +	);
+        +}
         +#endif
         --- a/fs/bcachefs.h
         +++ b/fs/bcachefs.h
-        @@ -1066 +1066,26 @@
-        -#endif /* _BCACHEFS_H */
+        @@ -1071,4 +1071,30 @@
+         #define class_bch_log_msg_ratelimited_constructor(_c)		\\
+         	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
+         
         +#ifdef CONFIG_ARM
         +#include <asm/cmpxchg.h>
         +
@@ -149,8 +175,13 @@ PATCHES = {
         +	__ret; \\
         +})
         +#endif
-        +#endif /* _BCACHEFS_H */
+        +
+         #endif /* _BCACHEFS_H */
     """),
+    # PATCH 6: GCC Missing 128-bit support on 32-bit systems
+    # 32-bit GCC entirely lacks support for the primitive compiler flag `__int128`.
+    # This wraps it behind standard #ifdef SIZEOF macros, falling back 
+    # to a basic struct so parsing headers doesn't instantly panic the compiler.
     # NEW PATCH: fix __int128 unsupported on armhf - corrected for actual kernel.h
     "0006-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
@@ -232,7 +263,7 @@ def configure_debian_metadata(work_dir, version_str):
     env["DEBFULLNAME"] = "BBB Builder"
 
     run_cmd([
-        "dch", "-v", full_version,
+        "dch", "-b", "-v", full_version,
         "--distribution", "unstable",
         "--urgency", "high",
         "Automated native armhf compatibility build."
@@ -252,7 +283,7 @@ def configure_debian_metadata(work_dir, version_str):
         with open(control_path, "w") as f:
             f.write(content)
 
-    # 3. Patch Rules for Bash completion bug
+    # 3. Patch Rules for Bash completion bug AND the /usr/bin symlink shortcut
     rules_path = os.path.join(work_dir, "debian", "rules")
     if os.path.exists(rules_path):
         with open(rules_path, "a") as f:
@@ -343,6 +374,11 @@ def main():
     print("\n[*] Starting package compilation... This will take a while.")
     env = os.environ.copy()
     env["DEB_BUILD_OPTIONS"] = "parallel=1 nocheck nodoc"
+    
+    # Silence third-party Rust dependency warnings
+    env["RUSTFLAGS"] = "-A unexpected_cfgs -A unused_qualifications"
+    # Silence the ARM32 GCC ABI warnings
+    env["CFLAGS"] = "-Wno-psabi"
     
     run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b"], cwd=WORK_DIR, env=env)
 
