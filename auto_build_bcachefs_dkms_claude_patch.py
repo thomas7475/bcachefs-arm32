@@ -32,79 +32,67 @@ REQUIRED_TOOLS = [
 # automatically via quilt.
 # ---------------------------------------------------------------------------
 PATCHES = {
-    # PATCH 1: 32-bit Block Device IOCTLs
-    # Replaces the hardcoded 64-bit hex IOCTL block check with libc's native binding. 
-    # The libc crate automatically identifies the correct IOCTL signature (4-byte vs 8-byte 
-    # size pointer offsets) depending on arm32 vs arm64 targets.
-    "0001-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
+    # PATCH 1: Copy_fs Timestamps Cast
+    # Restored to prevent `bindgen` from inserting `_bitfield_1` padding structs 
+    # when glibc processes _TIME_BITS=64.
+    "0001-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
+        --- a/src/copy_fs.rs
+        +++ b/src/copy_fs.rs
+        @@ -301,9 +301,9 @@
+         
+         fn copy_times(fs: &Fs, dst: &mut c::bch_inode_unpacked, src: &rustix::fs::Stat) {
+             let make_ts = |sec, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
+         
+        -    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime, src.st_atime_nsec as _)) as u64;
+        -    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime, src.st_mtime_nsec as _)) as u64;
+        -    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime, src.st_ctime_nsec as _)) as u64;
+        +    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime as _, src.st_atime_nsec as _)) as u64;
+        +    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime as _, src.st_mtime_nsec as _)) as u64;
+        +    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime as _, src.st_ctime_nsec as _)) as u64;
+         }
+    """),
+    # PATCH 2: 32-bit Block Device IOCTLs
+    # Replaces the hardcoded 64-bit hex IOCTL block check with a logic to fall back to the 
+    # 32-bit command code (0x80041272) when compiling on ARM32.
+    "0002-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
         --- a/src/wrappers/bdev.rs
         +++ b/src/wrappers/bdev.rs
-        @@ -36,7 +36,7 @@
+        @@ -36,7 +36,11 @@
              target_arch = "sparc",
              target_arch = "sparc64",
          )))]
         -const BLKGETSIZE64: libc::Ioctl = 0x80081272u32 as libc::Ioctl;
-        +const BLKGETSIZE64: libc::Ioctl = libc::BLKGETSIZE64 as libc::Ioctl;
+        +const BLKGETSIZE64: libc::Ioctl = if cfg!(target_pointer_width = "32") {
+        +    0x80041272u32 as libc::Ioctl
+        +} else {
+        +    0x80081272u32 as libc::Ioctl
+        +};
          
          /// Returns the size of a file or block device in bytes.
     """),
-    # PATCH 2: Route 64-bit write buffer logic into native 32-bit fallback 
+    # PATCH 3: Route 64-bit write buffer logic into native 32-bit fallback 
     # Bcachefs explicitly wrote a 32-bit handler because 32-bit single-instruction
     # atomics (`smp_load_acquire`) don't exist, but it triggers it based on a Kernel 
     # macro that userspace compilers frequently miss. Checking GCC's size solves this cleanly.
-    "0002-write-buffer-smp-arm32.patch": textwrap.dedent("""\
+    "0003-write-buffer-smp-arm32.patch": textwrap.dedent("""\
         --- a/fs/btree/write_buffer.c
         +++ b/fs/btree/write_buffer.c
-        @@ -974,7 +974,7 @@
-         	 * half loads are sufficient here; torn reads may only make us think
-         	 * there is still work to do.
+        @@ -967,7 +967,7 @@
+         	 * after the drop means the following flushing read must observe the set
+         	 * that preceded it.
          	 */
         -#if BITS_PER_LONG == 32
         +#if (defined(BITS_PER_LONG) && BITS_PER_LONG == 32) || __SIZEOF_LONG__ == 4
-         	u64 inc = READ_ONCE(wb->inc.pin.seq);
-         	smp_rmb();
-         #else
+         	/*
+         	 * Journal pin seqs are always in the live journal window, so 32 bit
+         	 * half loads are sufficient here; torn reads may only make us think
     """),
-    # PATCH 3: ARM32 DKMS Module Math and Compare-and-Swap
-    # (Note: Left exactly as-is to preserve minimal intrusion over kernel imports).
-    # When compiling as a standalone DKMS Kernel Module on ARM32, 64-bit divisions emit 
-    # '__aeabi_uldivmod', which the Linux Kernel refuses to link against. We inject a naked 
-    # assembly function to catch these calls and route them safely to Linux's internal math 
-    # (div64_u64). We also manually map 'cmpxchg' 64-bit calls to the kernel's 'cmpxchg64'.
-    "0003-kernel-arm32-math-and-atomic.patch": textwrap.dedent("""\
-        --- a/fs/errcode.c
-        +++ b/fs/errcode.c
-        @@ -117,3 +117,27 @@
-         	trace_error_throw(c, bch2_err_str(err));
-         	return err;
-         }
-        +
-        +#ifdef CONFIG_ARM
-        +#include <linux/math64.h>
-        +uint64_t bch_div64_u64_rem(uint64_t dividend, uint64_t divisor, uint64_t *remainder) {
-        +	uint64_t quot = div64_u64(dividend, divisor);
-        +	*remainder = dividend - quot * divisor;
-        +	return quot;
-        +}
-        +
-        +void __attribute__((naked)) __aeabi_uldivmod(void);
-        +void __attribute__((naked)) __aeabi_uldivmod(void) {
-        +	asm volatile(
-        +		"push {lr}\\n"
-        +		"sub sp, sp, #20\\n"
-        +		"add r12, sp, #8\\n"
-        +		"str r12, [sp, #0]\\n"
-        +		"bl bch_div64_u64_rem\\n"
-        +		"ldr r2, [sp, #8]\\n"
-        +		"ldr r3, [sp, #12]\\n"
-        +		"add sp, sp, #20\\n"
-        +		"pop {pc}\\n"
-        +	);
-        +}
-        +#endif
+    # PATCH 4: ARM32 Compare-and-Swap
+    # Manually maps 'cmpxchg' 64-bit calls to the kernel's 'cmpxchg64'.
+    "0004-arm32-cmpxchg-fallback.patch": textwrap.dedent("""\
         --- a/fs/bcachefs.h
         +++ b/fs/bcachefs.h
-        @@ -1071,4 +1071,30 @@
+        @@ -1063,4 +1063,30 @@
          #define class_bch_log_msg_ratelimited_constructor(_c)		\\
          	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
          
@@ -136,11 +124,11 @@ PATCHES = {
         +
          #endif /* _BCACHEFS_H */
     """),
-    # PATCH 4: GCC Missing 128-bit support on 32-bit systems
+    # PATCH 5: GCC Missing 128-bit support on 32-bit systems
     # 32-bit GCC entirely lacks support for the primitive compiler flag `__int128`.
     # This wraps it behind standard #ifdef SIZEOF macros, falling back 
     # to a basic struct so parsing headers doesn't instantly panic the compiler.
-    "0004-conditional-__int128.patch": textwrap.dedent("""\
+    "0005-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
         +++ b/include/linux/kernel.h
         @@ -54,4 +54,6 @@ typedef __u64 u64;
@@ -330,13 +318,12 @@ def main():
     # Run the native compilation. 
     print("\n[*] Starting package compilation... This will take a while.")
     env = os.environ.copy()
-    env["DEB_BUILD_OPTIONS"] = "parallel=1 nocheck nodoc"
+    env["DEB_BUILD_OPTIONS"] = "parallel=$(nproc) nocheck nodoc"
     
     # Silence third-party Rust dependency warnings
     env["RUSTFLAGS"] = "-A unexpected_cfgs -A unused_qualifications"
     # Provide the 64-bit time/offset ABI to GCC and Bindgen natively
-    env["CFLAGS"] = "-Wno-psabi -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
-    env["BINDGEN_EXTRA_CLANG_ARGS"] = "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
+    env["CFLAGS"] = "-Wno-psabi"
     
     run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b"], cwd=WORK_DIR, env=env)
 
