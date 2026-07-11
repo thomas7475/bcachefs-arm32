@@ -139,6 +139,55 @@ PATCHES = {
         +#endif
          typedef __u32 u32;
     """),
+    # PATCH 6: ARM32 DKMS Module Math (__aeabi_uldivmod fallback)
+    # 64-bit divisions emit '__aeabi_uldivmod' on ARM32. This catches these calls 
+    # and routes them safely to Linux's internal math (div64_u64).
+    # PATCH: Fix 64-bit division in bcachefs inode logic
+    "0006-inode-math-fallback.patch": textwrap.dedent("""\
+        --- a/fs/fs/inode.c
+        +++ b/fs/fs/inode.c
+        @@ -1020,7 +1020,7 @@
+         	 */
+         	u64 denom = 400ULL * btree_node_bytes;
+         	unsigned size_bits = btree_node_bytes && fs_size >= denom
+        -		? ilog2(fs_size / denom)
+        +		? ilog2(div64_u64(fs_size, denom))
+         		: 0;
+         
+         	return min(min(cpu_bits, size_bits), 8U);
+    """),
+
+    # PATCH 7: Fix 64-bit division in journal initialization
+    "0007-journal-init-math-fallback.patch": textwrap.dedent("""\
+        --- a/fs/journal/init.c
+        +++ b/fs/journal/init.c
+        @@ -282,7 +282,7 @@
+         	 */
+         	nr = clamp_t(unsigned, nr,
+         		     BCH_JOURNAL_BUCKETS_MIN,
+        -		     system_totalram_bytes() / 4 / bucket_bytes(ca));
+        +		     div64_u64(system_totalram_bytes() / 4, bucket_bytes(ca)));
+         
+         	ret = bch2_set_nr_journal_buckets_loop(c, ca, nr, new_fs);
+    """),
+
+    # PATCH 8: Fix 64-bit division in the btree write buffer
+    "0008-write-buffer-math-fallback.patch": textwrap.dedent("""\
+        --- a/fs/btree/write_buffer.c
+        +++ b/fs/btree/write_buffer.c
+        @@ -1393,10 +1393,10 @@
+         		prt_printf(out, "shards total:\\t%llu\\n",	wb->nr_shards_total);
+         		if (wb->nr_flushes)
+         			prt_printf(out, "avg shards/flush:\\t%llu\\n",
+        -				   wb->nr_shards_total / wb->nr_flushes);
+        +				   div64_u64(wb->nr_shards_total, wb->nr_flushes));
+         		if (wb->nr_shards_total)
+         			prt_printf(out, "avg shard size:\\t%llu\\n",
+        -				   wb->nr_keys_flushed / wb->nr_shards_total);
+        +				   div64_u64(wb->nr_keys_flushed, wb->nr_shards_total));
+         
+         		prt_printf(out, "flush work:\\t%s\\n",
+    """),
 }
 
 def run_cmd(cmd, cwd=None, env=None):
