@@ -129,18 +129,24 @@ PATCHES = {
     """),
     # PATCH 5: GCC Missing 128-bit support on 32-bit systems
     # 32-bit GCC entirely lacks support for the primitive compiler flag `__int128`.
-    # This wraps it behind standard #ifdef SIZEOF macros, falling back 
-    # to a basic struct so parsing headers doesn't instantly panic the compiler.
+    # Instead of deleting the type (which breaks AST/structs referencing u128),
+    # this provides a structurally identical 16-byte fallback struct. 
+    # If the code tries to apply hardware math (+, *, /) to this dummy struct 
+    # natively, the compiler safely traps it so we can write proper 32-bit fallbacks.
     "0005-conditional-__int128.patch": textwrap.dedent("""\
         --- a/include/linux/kernel.h
         +++ b/include/linux/kernel.h
-        @@ -54,4 +54,6 @@ typedef __u64 u64;
+        @@ -53,5 +53,9 @@
+         typedef __u64 u64;
          typedef __s64 s64;
         -typedef unsigned __int128 u128;
         +#ifdef __SIZEOF_INT128__
         +typedef unsigned __int128 u128;
+        +#else
+        +typedef struct { u64 lo; u64 hi; } u128;
         +#endif
          typedef __u32 u32;
+         typedef __s32 s32;
     """),
     # PATCH 6: ARM32 DKMS Module Math (__aeabi_uldivmod fallback)
     # 64-bit divisions emit '__aeabi_uldivmod' on ARM32. This catches these calls 
@@ -218,6 +224,119 @@ PATCHES = {
                          (1, fs.timespec_to_time(ts) as u64)
                      }
                  };
+    """),
+    # PATCH 10: 32-bit Fallback for 128-bit Division (mul_u64_u64_div_u64)
+    # Replaces the unconditional __int128 with a portable 64x64->128 multiply
+    # and division fallback when building on architectures like ARM32.
+    "0010-math64-conditional-int128.patch": textwrap.dedent("""\
+        --- a/include/linux/math64.h
+        +++ b/include/linux/math64.h
+        @@ -53,6 +53,60 @@
+         }
+ 
+         /**
+        + * mul_u64_u64_div_u64 - unsigned 64bit multiply then divide, with a 128bit
+        + * intermediate and fallback for ARM32
+        + */
+        +static inline u64 mul_u64_u64_div_u64(u64 factor_a, u64 factor_b, u64 divisor)
+        +{
+        +#ifdef __SIZEOF_INT128__
+        +	// Fast path: 128-bit integer support
+        +	return (unsigned __int128) factor_a * factor_b / divisor;
+        +
+        +#else
+        +	// 64x64 -> 128-bit multiplication
+        +	u64 a_low  = factor_a & 0xFFFFFFFF;
+        +	u64 a_high = factor_a >> 32;
+        +	u64 b_low  = factor_b & 0xFFFFFFFF;
+        +	u64 b_high = factor_b >> 32;
+        +
+        +	u64 low_product  = a_low * b_low;
+        +	u64 cross_term_1 = a_low * b_high;
+        +	u64 cross_term_2 = a_high * b_low;
+        +	u64 high_product = a_high * b_high;
+        +
+        +	u64 middle_sum = (low_product >> 32) + (cross_term_1 & 0xFFFFFFFF) + (cross_term_2 & 0xFFFFFFFF);
+        +
+        +	u64 prod_high = high_product + (cross_term_1 >> 32) + (cross_term_2 >> 32) + (middle_sum >> 32);
+        +	u64 prod_low  = (middle_sum << 32) | (low_product & 0xFFFFFFFF);
+        +
+        +	// 128-bit / 64-bit division
+        +	if (prod_high == 0) {
+        +		return prod_low / divisor;
+        +	}
+        +
+        +	// Manual long division (shift-and-subtract)
+        +	u64 quotient = 0;
+        +	int bit_index;
+        +
+        +	for (bit_index = 0; bit_index < 64; bit_index++) {
+        +		u64 highest_bit_carry = prod_high >> 63;
+        +
+        +		prod_high = (prod_high << 1) | (prod_low >> 63);
+        +		prod_low <<= 1;
+        +
+        +		if (highest_bit_carry || prod_high >= divisor) {
+        +			prod_high -= divisor;
+        +			quotient = (quotient << 1) | 1;
+        +		} else {
+        +			quotient <<= 1;
+        +		}
+        +	}
+        +
+        +	return quotient;
+        +#endif
+        +}
+        +
+        +/**
+          * div64_s64 - signed 64bit divide with 64bit divisor
+          */
+         static inline s64 div64_s64(s64 dividend, s64 divisor)
+    """),
+    # PATCH 10: Add dh-cargo Built-Using marker for bcachefs_static_wrappers
+    # Backported from upstream 1.38.8; avoids dh-cargo-built-using abort.
+    "0010-dh-cargo-built-using.patch": textwrap.dedent("""\
+        --- a/bcachefs-shim/build.rs
+        +++ b/bcachefs-shim/build.rs
+        @@ -115,4 +115,14 @@
+                 wrappers.include(p);
+             }
+             wrappers.compile("bcachefs_shim_static_wrappers");
+        +
+        +    // dh-cargo Built-Using (Debian): point at the workspace root (== the dpkg
+        +    // build's $PWD) so dh-cargo-built-using sees this lib as built from our own
+        +    // in-tree source and skips it, rather than aborting on a build path no
+        +    // Debian package owns. Mirrors the same declaration in fs/build.rs and
+        +    // bch_bindgen/build.rs. `root` is top_dir's parent, i.e. the workspace root.
+        +    println!(
+        +        "dh-cargo:deb-built-using=bcachefs_shim_static_wrappers=0={}",
+        +        root.display()
+        +    );
+         }
+    """),
+    # PATCH 11: Add dh-cargo Built-Using marker for bcachefs_static_wrappers
+    # Backported from upstream 1.38.8; avoids dh-cargo-built-using abort.
+    "0011-dh-cargo-built-using.patch": textwrap.dedent("""\
+        --- a/fs/build.rs
+        +++ b/fs/build.rs
+        @@ -54,4 +54,17 @@
+                 w.flag(f);
+             }
+             w.compile("bcachefs_static_wrappers");
+        +
+        +    // dh-cargo Built-Using (Debian): point the path at the package root (the
+        +    // workspace root, == the dpkg build's $PWD) so dh-cargo-built-using sees
+        +    // this lib as built from our own in-tree source and skips it, rather than
+        +    // aborting on a build path no Debian package owns. Mirrors the same
+        +    // declaration in bch_bindgen/build.rs; `src` is fs/, its parent is the root.
+        +    println!(
+        +        "dh-cargo:deb-built-using=bcachefs_static_wrappers=0={}",
+        +        std::path::Path::new(&src)
+        +            .parent()
+        +            .expect("fs crate has a parent dir")
+        +            .display()
+        +    );
+         }
     """),
 }
 
