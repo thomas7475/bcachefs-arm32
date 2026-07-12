@@ -231,15 +231,17 @@ PATCHES = {
     "0010-math64-conditional-int128.patch": textwrap.dedent("""\
         --- a/include/linux/math64.h
         +++ b/include/linux/math64.h
-        @@ -53,6 +53,60 @@
-         }
+        @@ -54,11 +54,56 @@
  
          /**
-        + * mul_u64_u64_div_u64 - unsigned 64bit multiply then divide, with a 128bit
+          * mul_u64_u64_div_u64 - unsigned 64bit multiply then divide, with a 128bit
+        - * intermediate
         + * intermediate and fallback for ARM32
-        + */
+          */
+        -static inline u64 mul_u64_u64_div_u64(u64 a, u64 b, u64 c)
         +static inline u64 mul_u64_u64_div_u64(u64 factor_a, u64 factor_b, u64 divisor)
-        +{
+         {
+        -	return (unsigned __int128) a * b / c;
         +#ifdef __SIZEOF_INT128__
         +	// Fast path: 128-bit integer support
         +	return (unsigned __int128) factor_a * factor_b / divisor;
@@ -286,12 +288,10 @@ PATCHES = {
         +
         +	return quotient;
         +#endif
-        +}
-        +
-        +/**
-          * div64_s64 - signed 64bit divide with 64bit divisor
-          */
-         static inline s64 div64_s64(s64 dividend, s64 divisor)
+         }
+ 
+         /**
+
     """),
 }
 
