@@ -328,7 +328,7 @@ def configure_debian_metadata(work_dir, version_str):
 
 def setup_cargo_vendor(work_dir, version_str):
     print("[*] Vendoring Rust dependencies (requires network) ...")
-    vendor_cache_dir = os.path.abspath(f"vendor-cache-{version_str}")
+    vendor_cache_dir = os.path.abspath(f"vendor-cache-shared")
     
     if not os.path.isdir(vendor_cache_dir):
         run_cmd(["cargo", "vendor", vendor_cache_dir], cwd=work_dir)
@@ -387,10 +387,21 @@ def main():
     # Determine Version string based on git commit & target name
     result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WORK_DIR, capture_output=True, text=True)
     commit = result.stdout.strip() if result.returncode == 0 else "unknown"
-    date = datetime.now().strftime("%Y%m%d")
     
     clean_version = target_ref.lstrip('v')
-    version_str = f"{clean_version}+{date}.g{commit}"
+    
+    # Check if target is a branch (e.g., 'master' does not start with a digit)
+    if not clean_version or not clean_version[0].isdigit():
+        # Get the newest tag for the base version
+        tag_res = subprocess.run(["git", "describe", "--tags", "--abbrev=0"], cwd=WORK_DIR, capture_output=True, text=True)
+        latest_tag = tag_res.stdout.strip().lstrip('v') if tag_res.returncode == 0 else "0.0.0"
+        
+        # We must use '+' instead of '_' because Debian prohibits underscores in versions.
+        clean_version = f"{latest_tag}+{clean_version}"
+
+    # Build the final version string without the date.
+    # E.g., "1.38.8+master.gdde5ecf6a" or "1.38.8.gdde5ecf6a"
+    version_str = f"{clean_version}.g{commit}"
 
     # Configure the build environment properly using patches and debscripts
     apply_quilt_patches(WORK_DIR)
