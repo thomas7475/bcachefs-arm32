@@ -293,51 +293,6 @@ PATCHES = {
           */
          static inline s64 div64_s64(s64 dividend, s64 divisor)
     """),
-    # PATCH 10: Add dh-cargo Built-Using marker for bcachefs_static_wrappers
-    # Backported from upstream 1.38.8; avoids dh-cargo-built-using abort.
-    "0010-dh-cargo-built-using.patch": textwrap.dedent("""\
-        --- a/bcachefs-shim/build.rs
-        +++ b/bcachefs-shim/build.rs
-        @@ -115,4 +115,14 @@
-                 wrappers.include(p);
-             }
-             wrappers.compile("bcachefs_shim_static_wrappers");
-        +
-        +    // dh-cargo Built-Using (Debian): point at the workspace root (== the dpkg
-        +    // build's $PWD) so dh-cargo-built-using sees this lib as built from our own
-        +    // in-tree source and skips it, rather than aborting on a build path no
-        +    // Debian package owns. Mirrors the same declaration in fs/build.rs and
-        +    // bch_bindgen/build.rs. `root` is top_dir's parent, i.e. the workspace root.
-        +    println!(
-        +        "dh-cargo:deb-built-using=bcachefs_shim_static_wrappers=0={}",
-        +        root.display()
-        +    );
-         }
-    """),
-    # PATCH 11: Add dh-cargo Built-Using marker for bcachefs_static_wrappers
-    # Backported from upstream 1.38.8; avoids dh-cargo-built-using abort.
-    "0011-dh-cargo-built-using.patch": textwrap.dedent("""\
-        --- a/fs/build.rs
-        +++ b/fs/build.rs
-        @@ -54,4 +54,17 @@
-                 w.flag(f);
-             }
-             w.compile("bcachefs_static_wrappers");
-        +
-        +    // dh-cargo Built-Using (Debian): point the path at the package root (the
-        +    // workspace root, == the dpkg build's $PWD) so dh-cargo-built-using sees
-        +    // this lib as built from our own in-tree source and skips it, rather than
-        +    // aborting on a build path no Debian package owns. Mirrors the same
-        +    // declaration in bch_bindgen/build.rs; `src` is fs/, its parent is the root.
-        +    println!(
-        +        "dh-cargo:deb-built-using=bcachefs_static_wrappers=0={}",
-        +        std::path::Path::new(&src)
-        +            .parent()
-        +            .expect("fs crate has a parent dir")
-        +            .display()
-        +    );
-         }
-    """),
 }
 
 def run_cmd(cmd, cwd=None, env=None):
