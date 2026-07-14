@@ -377,7 +377,7 @@ def configure_debian_metadata(work_dir, version_str):
         # Replace linux-headers check with DKMS
         content = re.sub(
             r'linux-headers-generic.*?linux-headers \(\>= [^\)]+\)',
-            'dkms', content, flags=re.DOTALL
+            'dkms, rustc, cargo, bindgen', content, flags=re.DOTALL
         )
         # Safely ensure libfuse3-dev is requested in Build-Depends
         if 'libfuse3-dev' not in content:
