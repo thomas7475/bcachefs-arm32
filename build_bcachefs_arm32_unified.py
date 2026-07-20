@@ -13,252 +13,11 @@ import re
 import argparse
 import textwrap
 
-REPO_URL = "https://github.com/koverstreet/bcachefs-tools.git"
+REPO_URL = "https://github.com/thomas7475/bcachefs-tools.git"  # <-- changed to your repo
 WORK_DIR = "bcachefs-tools"
 
 # ---------------------------------------------------------------------------
-#  			10 Compatibility Patches 
-# ---------------------------------------------------------------------------
-PATCHES = {
-    "0001-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
-        --- a/src/copy_fs.rs
-        +++ b/src/copy_fs.rs
-        @@ -300,11 +300,12 @@
-         }
-        
-         fn copy_times(fs: &Fs, dst: &mut c::bch_inode_unpacked, src: &rustix::fs::Stat) {
-        -    let make_ts = |sec, nsec| c::timespec64 { tv_sec: sec, tv_nsec: nsec };
-        +    let make_ts = |sec: i64, nsec: i64| c::timespec64 { tv_sec: sec as _, tv_nsec: nsec as _,
-        +                                              ..unsafe { std::mem::zeroed() } };
-        
-        -    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime, src.st_atime_nsec as _)) as u64;
-        -    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime, src.st_mtime_nsec as _)) as u64;
-        -    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime, src.st_ctime_nsec as _)) as u64;
-        +    dst.bi_atime = fs.timespec_to_time(make_ts(src.st_atime, src.st_atime_nsec as i64)) as u64;
-        +    dst.bi_mtime = fs.timespec_to_time(make_ts(src.st_mtime, src.st_mtime_nsec as i64)) as u64;
-        +    dst.bi_ctime = fs.timespec_to_time(make_ts(src.st_ctime, src.st_ctime_nsec as i64)) as u64;
-         }
-    """),
-    "0002-bdev-32bit-ioctl-fallback.patch": textwrap.dedent("""\
-        --- a/src/wrappers/bdev.rs
-        +++ b/src/wrappers/bdev.rs
-        @@ -36,7 +36,11 @@
-             target_arch = "sparc",
-             target_arch = "sparc64",
-         )))]
-        -const BLKGETSIZE64: libc::Ioctl = 0x80081272u32 as libc::Ioctl;
-        +const BLKGETSIZE64: libc::Ioctl = if cfg!(target_pointer_width = "32") {
-        +    0x80041272u32 as libc::Ioctl
-        +} else {
-        +    0x80081272u32 as libc::Ioctl
-        +};
-         
-         /// Returns the size of a file or block device in bytes.
-    """),
-    "0003-write-buffer-smp-arm32.patch": textwrap.dedent("""\
-        --- a/fs/btree/write_buffer.c
-        +++ b/fs/btree/write_buffer.c
-        @@ -967,7 +967,7 @@
-         	 * after the drop means the following flushing read must observe the set
-         	 * that preceded it.
-         	 */
-        -#if BITS_PER_LONG == 32
-        +#if (defined(BITS_PER_LONG) && BITS_PER_LONG == 32) || __SIZEOF_LONG__ == 4
-         	/*
-         	 * Journal pin seqs are always in the live journal window, so 32 bit
-         	 * half loads are sufficient here; torn reads may only make us think
-    """),
-    "0004-arm32-cmpxchg-fallback.patch": textwrap.dedent("""\
-        --- a/fs/bcachefs.h
-        +++ b/fs/bcachefs.h
-        @@ -1063,4 +1063,30 @@
-         #define class_bch_log_msg_ratelimited_constructor(_c)		\\
-         	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c), false)
-         
-        +#ifdef CONFIG_ARM
-        +#include <asm/cmpxchg.h>
-        +
-        +#undef cmpxchg
-        +#define cmpxchg(ptr, o, n) \\
-        +({ \\
-        +	__typeof__(*(ptr)) __ret; \\
-        +	if (sizeof(*(ptr)) == 8) \\
-        +		__ret = cmpxchg64((ptr), (o), (n)); \\
-        +	else \\
-        +		__ret = (__typeof__(*(ptr)))__cmpxchg((ptr), (unsigned long)(o), (unsigned long)(n), sizeof(*(ptr))); \\
-        +	__ret; \\
-        +})
-        +
-        +#undef cmpxchg_local
-        +#define cmpxchg_local(ptr, o, n) \\
-        +({ \\
-        +	__typeof__(*(ptr)) __ret; \\
-        +	if (sizeof(*(ptr)) == 8) \\
-        +		__ret = cmpxchg64_local((ptr), (o), (n)); \\
-        +	else \\
-        +		__ret = (__typeof__(*(ptr)))__cmpxchg_local((ptr), (unsigned long)(o), (unsigned long)(n), sizeof(*(ptr))); \\
-        +	__ret; \\
-        +})
-        +#endif
-        +
-         #endif /* _BCACHEFS_H */
-    """),
-    "0005-conditional-__int128.patch": textwrap.dedent("""\
-        --- a/include/linux/kernel.h
-        +++ b/include/linux/kernel.h
-        @@ -53,5 +53,9 @@
-         typedef __u64 u64;
-         typedef __s64 s64;
-        -typedef unsigned __int128 u128;
-        +#ifdef __SIZEOF_INT128__
-        +typedef unsigned __int128 u128;
-        +#else
-        +typedef struct { u64 lo; u64 hi; } u128;
-        +#endif
-         typedef __u32 u32;
-         typedef __s32 s32;
-    """),
-    "0006-inode-math-fallback.patch": textwrap.dedent("""\
-        --- a/fs/fs/inode.c
-        +++ b/fs/fs/inode.c
-        @@ -1020,7 +1020,7 @@
-         	 */
-         	u64 denom = 400ULL * btree_node_bytes;
-         	unsigned size_bits = btree_node_bytes && fs_size >= denom
-        -		? ilog2(fs_size / denom)
-        +		? ilog2(div64_u64(fs_size, denom))
-         		: 0;
-         
-         	return min(min(cpu_bits, size_bits), 8U);
-    """),
-    "0007-journal-init-math-fallback.patch": textwrap.dedent("""\
-        --- a/fs/journal/init.c
-        +++ b/fs/journal/init.c
-        @@ -282,7 +282,7 @@
-         	 */
-         	nr = clamp_t(unsigned, nr,
-         		     BCH_JOURNAL_BUCKETS_MIN,
-        -		     system_totalram_bytes() / 4 / bucket_bytes(ca));
-        +		     div64_u64(system_totalram_bytes() / 4, bucket_bytes(ca)));
-         
-         	ret = bch2_set_nr_journal_buckets_loop(c, ca, nr, new_fs);
-    """),
-    "0008-write-buffer-math-fallback.patch": textwrap.dedent("""\
-        --- a/fs/btree/write_buffer.c
-        +++ b/fs/btree/write_buffer.c
-        @@ -1393,10 +1393,10 @@
-         		prt_printf(out, "shards total:\\t%llu\\n",	wb->nr_shards_total);
-         		if (wb->nr_flushes)
-         			prt_printf(out, "avg shards/flush:\\t%llu\\n",
-        -				   wb->nr_shards_total / wb->nr_flushes);
-        +				   div64_u64(wb->nr_shards_total, wb->nr_flushes));
-         		if (wb->nr_shards_total)
-         			prt_printf(out, "avg shard size:\\t%llu\\n",
-        -				   wb->nr_keys_flushed / wb->nr_shards_total);
-        +				   div64_u64(wb->nr_keys_flushed, wb->nr_shards_total));
-         
-         		prt_printf(out, "flush work:\\t%s\\n",
-    """),
-    "0009-fusemount-timestamp-padding.patch": textwrap.dedent("""\
-        --- a/src/commands/fusemount.rs
-        +++ b/src/commands/fusemount.rs
-        @@ -513,16 +513,18 @@
-                     None => (0, 0),
-                     Some(TimeOrNow::Now) => (2, 0),
-                     Some(TimeOrNow::SpecificTime(t)) => {
-                         let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-        -                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
-        +                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _,
-        +                                       ..unsafe { std::mem::zeroed() } };
-                         (1, fs.timespec_to_time(ts) as u64)
-                     }
-                 };
-                 let (mtime_flag, mtime_val): (i32, u64) = match &mtime {
-                     None => (0, 0),
-                     Some(TimeOrNow::Now) => (2, 0),
-                     Some(TimeOrNow::SpecificTime(t)) => {
-                         let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-        -                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
-        +                let ts = c::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _,
-        +                                       ..unsafe { std::mem::zeroed() } };
-                         (1, fs.timespec_to_time(ts) as u64)
-                     }
-                 };
-    """),
-    # PATCH 10: 32-bit Fallback for 128-bit Division (mul_u64_u64_div_u64)
-    # Replaces the unconditional __int128 with a portable 64x64->128 multiply
-    # and division fallback when building on architectures like ARM32.
-"0010-math64-conditional-int128.patch": textwrap.dedent("""\
---- a/include/linux/math64.h
-+++ b/include/linux/math64.h
---- math64.h	2026-07-12 20:24:05.263155198 +0200
-+++ math641.h	2026-07-12 18:59:02.870152765 +0200
-@@ -53,6 +53,60 @@
- }
- 
- /**
-+ * mul_u64_u64_div_u64 - unsigned 64bit multiply then divide, with a 128bit
-+ * intermediate and fallback for ARM32
-+ */
-+static inline u64 mul_u64_u64_div_u64(u64 factor_a, u64 factor_b, u64 divisor)
-+{
-+#ifdef __SIZEOF_INT128__
-+	// Fast path: 128-bit integer support
-+	return (unsigned __int128) factor_a * factor_b / divisor;
-+
-+#else
-+	// 64x64 -> 128-bit multiplication
-+	u64 a_low  = factor_a & 0xFFFFFFFF;
-+	u64 a_high = factor_a >> 32;
-+	u64 b_low  = factor_b & 0xFFFFFFFF;
-+	u64 b_high = factor_b >> 32;
-+
-+	u64 low_product  = a_low * b_low;
-+	u64 cross_term_1 = a_low * b_high;
-+	u64 cross_term_2 = a_high * b_low;
-+	u64 high_product = a_high * b_high;
-+
-+	u64 middle_sum = (low_product >> 32) + (cross_term_1 & 0xFFFFFFFF) + (cross_term_2 & 0xFFFFFFFF);
-+
-+	u64 prod_high = high_product + (cross_term_1 >> 32) + (cross_term_2 >> 32) + (middle_sum >> 32);
-+	u64 prod_low  = (middle_sum << 32) | (low_product & 0xFFFFFFFF);
-+
-+	// 128-bit / 64-bit division
-+	if (prod_high == 0) {
-+		return prod_low / divisor;
-+	}
-+
-+	// Manual long division (shift-and-subtract)
-+	u64 quotient = 0;
-+	int bit_index;
-+
-+	for (bit_index = 0; bit_index < 64; bit_index++) {
-+		u64 highest_bit_carry = prod_high >> 63;
-+
-+		prod_high = (prod_high << 1) | (prod_low >> 63);
-+		prod_low <<= 1;
-+
-+		if (highest_bit_carry || prod_high >= divisor) {
-+			prod_high -= divisor;
-+			quotient = (quotient << 1) | 1;
-+		} else {
-+			quotient <<= 1;
-+		}
-+	}
-+
-+	return quotient;
-+#endif
-+}
-+
-+/**
-  * div64_s64 - signed 64bit divide with 64bit divisor
-  */
- static inline s64 div64_s64(s64 dividend, s64 divisor)
-
-    """),
-}
-# ---------------------------------------------------------------------------
-#  Build functions (run inside the container)
+# Build functions (run inside the container)
 # ---------------------------------------------------------------------------
 def run_cmd(cmd, cwd=None, env=None, show_output=True):
     print(f"[*] Running: {' '.join(str(c) for c in cmd)}")
@@ -281,33 +40,6 @@ def get_current_epoch(work_dir):
     if m and ":" in m.group(1):
         return m.group(1).split(":", 1)[0] + ":"
     return ""
-
-def apply_quilt_patches(work_dir):
-    patch_dir = os.path.join(work_dir, "debian", "patches")
-    os.makedirs(patch_dir, exist_ok=True)
-    print("\n[*] Writing Quilt/Debian compatibility patches...")
-    series_lines = []
-    for patch_name, patch_content in PATCHES.items():
-        patch_path = os.path.join(patch_dir, patch_name)
-        with open(patch_path, "w") as f:
-            f.write(patch_content)
-        series_lines.append(patch_name)
-        print(f"    -> Added {patch_name}")
-    series_path = os.path.join(patch_dir, "series")
-    with open(series_path, "w") as f:
-        f.write("\n".join(series_lines) + "\n")
-
-def apply_quilt_patches_manually(work_dir):
-    print("[*] Applying Quilt patches...")
-    env = os.environ.copy()
-    env["QUILT_PATCHES"] = "debian/patches"
-    res = subprocess.run(["quilt", "push", "-a"], cwd=work_dir, env=env, capture_output=True, text=True)
-    if res.returncode != 0:
-        if "already applied" in res.stdout or "already applied" in res.stderr:
-            print("[*] Patches already committed or applied in tree. Continuing...")
-        else:
-            print(f"[!] Quilt application aborted:\n{res.stdout}\n{res.stderr}")
-            sys.exit(1)
 
 def configure_debian_metadata(work_dir, version_str):
     epoch = get_current_epoch(work_dir)
@@ -412,7 +144,6 @@ def build_inside_container(target_ref):
             print(f"    {cmd} failed: {result.stderr.strip()}")
     print()
 
-
     if re.match(r'^\d', target_ref):
         target_ref = f"v{target_ref}"
 
@@ -429,8 +160,9 @@ def build_inside_container(target_ref):
         clean_version = f"{latest_tag}+{clean_version}"
     version_str = f"{clean_version}.g{commit}"
 
-    apply_quilt_patches(WORK_DIR)
-    apply_quilt_patches_manually(WORK_DIR)
+    # Patches are already integrated in the source; no need to apply them.
+    # apply_quilt_patches and apply_quilt_patches_manually have been removed.
+
     configure_debian_metadata(WORK_DIR, version_str)
     
     strip_werror(WORK_DIR)
@@ -457,8 +189,8 @@ def build_inside_container(target_ref):
     # env["HOSTCXX"] = "g++"
     
     existing_rustflags = env.get("RUSTFLAGS", "")
-    env["RUSTFLAGS"] = f"{existing_rustflags} -A unexpected_cfgs -A unused_qualifications".strip()
-    
+    env["RUSTFLAGS"] = f"{existing_rustflags} -A unexpected_cfgs -A unused_qualifications".strip() 
+    env["RUST_TARGET"] = "arm-unknown-linux-gnueabi"
     env["BCACHEFS_FUSE"] = "1"
     
     # FIXED: Enforce time alignments for compilers and bindgen parsing
@@ -476,9 +208,8 @@ def build_inside_container(target_ref):
         show_output=True
     )
 
-    full_version = configure_debian_metadata(WORK_DIR, version_str)  # modify function to return it
-    run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b", f"-v{full_version}"], ...)
-    #run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b", "-v"], cwd=WORK_DIR, env=env, show_output=True)
+    configure_debian_metadata(WORK_DIR, version_str)
+    run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b"], cwd=WORK_DIR, env=env, show_output=True)
 
     print("\n=======================================================")
     print(f" [SUCCESS] Artifacts created: bcachefs-tools_{version_str}-1_armhf.deb")
@@ -499,7 +230,7 @@ def install_dependencies():
         "zlib1g-dev", "locales", "libterm-readline-perl-perl", "dialog","ca-certificates",
         "libclang-dev", "clang", "llvm",
         "cargo", "rustc", "libstd-rust-dev", "dh-cargo", "dh-dkms", "jq",
-        "bindgen", "rust-src"  # <-- ADDED missing dependencies
+        "bindgen", "rust-src"
     ], check=True)
 
     print("[*] Setting locales...")
