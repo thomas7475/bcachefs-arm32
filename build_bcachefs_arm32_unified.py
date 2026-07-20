@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-auto_build_bcachefs_dkms_claude_patch.py  —  Bcachefs-Tools BBB Auto-Updater & Native Builder
-Targets: BeagleBone Black, Linux 7.x/6.x, armhf / armv7l
+build_bcachefs_arm32_unified.py
+Unified, self-contained single-script builder for Bcachefs-tools & DKMS on ARM32.
+Can be executed directly on x86_64 hosts (runs container emulation) or natively.
 """
 
 import os
@@ -15,7 +16,9 @@ import textwrap
 REPO_URL = "https://github.com/koverstreet/bcachefs-tools.git"
 WORK_DIR = "bcachefs-tools"
 
-# Complete 10 arm32-compatibility patches
+# ---------------------------------------------------------------------------
+#  			10 Compatibility Patches 
+# ---------------------------------------------------------------------------
 PATCHES = {
     "0001-copy_fs-timestamp-i64-cast.patch": textwrap.dedent("""\
         --- a/src/copy_fs.rs
@@ -254,15 +257,12 @@ PATCHES = {
 
     """),
 }
-
+# ---------------------------------------------------------------------------
+#  Build functions (run inside the container)
+# ---------------------------------------------------------------------------
 def run_cmd(cmd, cwd=None, env=None, show_output=True):
-    """Executes a command and streams output live. On error, aborts immediately."""
     print(f"[*] Running: {' '.join(str(c) for c in cmd)}")
-    if show_output:
-        res = subprocess.run(cmd, cwd=cwd, env=env)
-    else:
-        res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
-        
+    res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=not show_output, text=True)
     if res.returncode != 0:
         print(f"\n[!] Command failed: {' '.join(cmd)}")
         if not show_output:
@@ -283,87 +283,80 @@ def get_current_epoch(work_dir):
     return ""
 
 def apply_quilt_patches(work_dir):
-    """Writes patch unified diffs to debian/patches/ so quilt manages them safely."""
     patch_dir = os.path.join(work_dir, "debian", "patches")
     os.makedirs(patch_dir, exist_ok=True)
-    
-    print("\n[*] Initializing Quilt/Debian patchset...")
+    print("\n[*] Writing Quilt/Debian compatibility patches...")
     series_lines = []
     for patch_name, patch_content in PATCHES.items():
         patch_path = os.path.join(patch_dir, patch_name)
         with open(patch_path, "w") as f:
             f.write(patch_content)
         series_lines.append(patch_name)
-        print(f"    -> Staged {patch_name}")
-        
+        print(f"    -> Added {patch_name}")
     series_path = os.path.join(patch_dir, "series")
     with open(series_path, "w") as f:
         f.write("\n".join(series_lines) + "\n")
 
 def apply_quilt_patches_manually(work_dir):
-    """Applies patches manually using quilt. Resilient against pre-applied commits."""
-    print("[*] Applying patches...")
+    print("[*] Applying Quilt patches...")
     env = os.environ.copy()
     env["QUILT_PATCHES"] = "debian/patches"
     res = subprocess.run(["quilt", "push", "-a"], cwd=work_dir, env=env, capture_output=True, text=True)
     if res.returncode != 0:
         if "already applied" in res.stdout or "already applied" in res.stderr:
-            print("[*] Warning: Patches appear to be already integrated or partially applied. Proceeding...")
+            print("[*] Patches already committed or applied in tree. Continuing...")
         else:
-            print(f"[!] Quilt execution failed:\n{res.stdout}\n{res.stderr}")
+            print(f"[!] Quilt application aborted:\n{res.stdout}\n{res.stderr}")
             sys.exit(1)
 
 def configure_debian_metadata(work_dir, version_str):
-    """Updates debian changelog versions, metadata dependencies, and rules."""
     epoch = get_current_epoch(work_dir)
     full_version = f"{epoch}{version_str}-1"
-    
-    print(f"[*] Appending Debian changelog entry for {full_version}...")
+    print(f"[*] Appending Debian changelog version {full_version}...")
     env = os.environ.copy()
     env["DEBEMAIL"] = "bcachefs-builder@beaglebone.local"
     env["DEBFULLNAME"] = "BBB Builder"
-
     run_cmd([
         "dch", "-b", "-v", full_version,
         "--distribution", "unstable",
         "--urgency", "high",
         "Automated native armhf compatibility build."
     ], cwd=work_dir, env=env)
-
+    
     # Patch debian/control
     control_path = os.path.join(work_dir, "debian", "control")
     if os.path.exists(control_path):
         with open(control_path, "r") as f:
             content = f.read()
+        
+        # FIXED: Require installable 'rustc' and 'cargo' packages instead of 'rust'
         content = re.sub(
             r'linux-headers-generic.*?linux-headers \(\>= [^\)]+\)',
-            'dkms, rustc, rust-src, bindgen', content, flags=re.DOTALL
+            'dkms, rustc, cargo, rust-src, bindgen', content, flags=re.DOTALL
         )
         if 'libfuse3-dev' not in content:
             content = content.replace('Build-Depends: ', 'Build-Depends: libfuse3-dev, clang, llvm, ')
+            # Rename DKMS package from bcachefs-kernel-dkms to bcachefs-dkms
+            content = re.sub(r'^Package:\s*bcachefs-kernel-dkms\s*$', 'Package: bcachefs-dkms', content, flags=re.MULTILINE)
         with open(control_path, "w") as f:
             f.write(content)
-
+            
     # Patch debian/rules
     rules_path = os.path.join(work_dir, "debian", "rules")
     if os.path.exists(rules_path):
-        with open(rules_path, "r") as f:
-            rules_content = f.read()
-        if "override_dh_install:" not in rules_content:
-            with open(rules_path, "a") as f:
-                f.write(
-                    "\noverride_dh_install:\n"
-                    "\tmkdir -p debian/tmp/usr/share/bash-completion/completions\n"
-                    "\ttouch debian/tmp/usr/share/bash-completion/completions/bcachefs\n"
-                    "\tdh_install\n"
-                    "\noverride_dh_link:\n"
-                    "\tdh_link\n"
-                    "\tdh_link usr/sbin/bcachefs usr/bin/bcachefs\n"
-                )
+        with open(rules_path, "a") as f:
+            f.write(
+                "\noverride_dh_install:\n"
+                "\tmkdir -p debian/tmp/usr/share/bash-completion/completions\n"
+                "\ttouch debian/tmp/usr/share/bash-completion/completions/bcachefs\n"
+                "\tdh_install\n"
+                "\noverride_dh_link:\n"
+                "\tdh_link\n"
+                "\tdh_link usr/sbin/bcachefs usr/bin/bcachefs\n"
+            )
 
 def setup_cargo_vendor(work_dir):
-    """Vendors dependencies inside the working tree."""
-    print("[*] Setting up cargo vendor target...")
+    print("[*] Vendoring Cargo dependencies...")
     vendor_cache_dir = os.path.abspath("vendor-cache-shared")
     if not os.path.isdir(vendor_cache_dir):
         run_cmd(["cargo", "vendor", vendor_cache_dir], cwd=work_dir)
@@ -371,9 +364,23 @@ def setup_cargo_vendor(work_dir):
     if not os.path.exists(vendor_link):
         os.symlink(vendor_cache_dir, vendor_link)
 
+def get_or_clone_repo(target_ref):
+    if os.path.exists(WORK_DIR):
+        git_dir = os.path.join(WORK_DIR, ".git")
+        if os.path.isdir(git_dir):
+            print(f"[*] Re-using workspace directory '{WORK_DIR}'")
+            run_cmd(["git", "fetch", "--all"], cwd=WORK_DIR)
+            run_cmd(["git", "fetch", "--tags"], cwd=WORK_DIR)
+            run_cmd(["git", "reset", "--hard"], cwd=WORK_DIR)
+            run_cmd(["git", "clean", "-fd"], cwd=WORK_DIR)
+            return
+        else:
+            shutil.rmtree(WORK_DIR)
+    print(f"[*] Cloning {REPO_URL}...")
+    run_cmd(["git", "clone", REPO_URL, WORK_DIR])
+
 def strip_werror(work_dir):
-    """De-escalates -Werror configurations inside the source codebase to prevent compile halts."""
-    print("[*] Defusing upstream '-Werror' limits...")
+    print("[*] Defusing compiler limits (-Werror -> -Wno-error)...")
     for root, _, files in os.walk(work_dir):
         for f in files:
             if f.endswith("build.rs") or f == "Makefile" or f.endswith(".mk"):
@@ -389,27 +396,23 @@ def strip_werror(work_dir):
                 except Exception:
                     pass
 
-def get_or_clone_repo(target_ref):
-    if os.path.exists(WORK_DIR):
-        git_dir = os.path.join(WORK_DIR, ".git")
-        if os.path.isdir(git_dir):
-            print(f"[*] Re-initializing workspace in {WORK_DIR}...")
-            run_cmd(["git", "fetch", "--all"], cwd=WORK_DIR)
-            run_cmd(["git", "fetch", "--tags"], cwd=WORK_DIR)
-            run_cmd(["git", "reset", "--hard"], cwd=WORK_DIR)
-            run_cmd(["git", "clean", "-fd"], cwd=WORK_DIR)
-            return
+def build_inside_container(target_ref):
+    print("\n=======================================================")
+    print("      Starting Native Build Routine (Inside Container) ")
+    print("=======================================================\n")
+    os.chdir("/build")
+ 
+    # Print Rust toolchain versions for verification
+    print("\n[*] Rust toolchain versions:")
+    for cmd in ["cargo --version", "rustc --version", "bindgen --version"]:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"    {result.stdout.strip()}")
         else:
-            shutil.rmtree(WORK_DIR)
-    print(f"[*] Fetching fresh bcachefs-tools repository...")
-    run_cmd(["git", "clone", REPO_URL, WORK_DIR])
+            print(f"    {cmd} failed: {result.stderr.strip()}")
+    print()
 
-def main():
-    parser = argparse.ArgumentParser(description="Clean, patch and build Bcachefs-tools natively.")
-    parser.add_argument("target", nargs="?", default="master", help="Tag or branch")
-    args = parser.parse_args()
 
-    target_ref = args.target
     if re.match(r'^\d', target_ref):
         target_ref = f"v{target_ref}"
 
@@ -426,45 +429,162 @@ def main():
         clean_version = f"{latest_tag}+{clean_version}"
     version_str = f"{clean_version}.g{commit}"
 
-    # Prepare environment variables robustly
-    env = os.environ.copy()
-    
-    # 1. Defuse global OUT_DIR if it is leaked to prevent Cargo build-script pollution
-    if "OUT_DIR" in env:
-        del env["OUT_DIR"]
-
-    # 2. Add standard compilation flags 
-    env["DEB_BUILD_OPTIONS"] = "parallel=$(nproc) nocheck nodoc"
-    env["RUSTFLAGS"] = "-A unexpected_cfgs -A unused_qualifications"
-    env["BCACHEFS_FUSE"] = "1"
-    
-    # 3. Align bindgen with 64-bit timespec structures
-    env["CFLAGS"] = "-Wno-psabi -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -Wno-error"
-    env["BINDGEN_EXTRA_CLANG_ARGS"] = "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
-
-    # Patch and vendor configurations
     apply_quilt_patches(WORK_DIR)
     apply_quilt_patches_manually(WORK_DIR)
     configure_debian_metadata(WORK_DIR, version_str)
+    
     strip_werror(WORK_DIR)
     setup_cargo_vendor(WORK_DIR)
 
-    # Live-streamed verification build step
+    run_cmd(["cargo", "clean"], cwd=WORK_DIR)
+
+    # -------------------------------------------------------------------------
+    # Configure Environment Variables
+    # -------------------------------------------------------------------------
+    env = os.environ.copy()
+    
+    # FIXED: Clear out workspace-contaminating OUT_DIR if set globally
+    if "OUT_DIR" in env:
+        del env["OUT_DIR"]
+    
+    env["DEB_BUILD_OPTIONS"] = "parallel=$(nproc) nocheck nodoc"
+    
+    # FIXED: Revert CC and HOSTCC compilation flags to native system GCC 
+    # REMOVE OR COMMENT OUT THESE OVERRIDES TO PREVENT BINDGEN FROM FAILING:
+    # env["CC"] = "gcc"
+    # env["CXX"] = "g++"
+    # env["HOSTCC"] = "gcc"
+    # env["HOSTCXX"] = "g++"
+    
+    existing_rustflags = env.get("RUSTFLAGS", "")
+    env["RUSTFLAGS"] = f"{existing_rustflags} -A unexpected_cfgs -A unused_qualifications".strip()
+    
+    env["BCACHEFS_FUSE"] = "1"
+    
+    # FIXED: Enforce time alignments for compilers and bindgen parsing
+    env["CFLAGS"] = "-Wno-psabi -D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64 -Wno-error"
+    env["BINDGEN_EXTRA_CLANG_ARGS"] = "-D_TIME_BITS=64 -D_FILE_OFFSET_BITS=64"
+
     print("\n=======================================================")
     print(" [*] DIRECT CARGO KERNEL BUILD TEST")
     print("=======================================================")
-    run_cmd(["cargo", "build", "-p", "bcachefs-kernel", "-vv"], cwd=WORK_DIR, env=env, show_output=True)
+    # Stream build output directly for transparent error reporting
+    run_cmd(
+        ["cargo", "build", "-p", "bcachefs-kernel", "-vv"],
+        cwd=WORK_DIR,
+        env=env,
+        show_output=True
+    )
 
-    # Native packaging step
-    print("\n=======================================================")
-    print(" [*] GENERATING DEBIAN COMPATIBLE PACKAGE ARTIFACTS")
-    print("=======================================================")
-    run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b"], cwd=WORK_DIR, env=env, show_output=True)
+    full_version = configure_debian_metadata(WORK_DIR, version_str)  # modify function to return it
+    run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b", f"-v{full_version}"], ...)
+    #run_cmd(["dpkg-buildpackage", "-us", "-uc", "-b", "-v"], cwd=WORK_DIR, env=env, show_output=True)
 
     print("\n=======================================================")
-    print(f" [SUCCESS] Output generated: bcachefs-tools_{version_str}-1_armhf.deb")
+    print(f" [SUCCESS] Artifacts created: bcachefs-tools_{version_str}-1_armhf.deb")
     print("=======================================================\n")
 
+def install_dependencies():
+    print("[*] Installing build dependencies inside container...")
+    subprocess.run(["apt-get", "update"], check=True)
+    subprocess.run([
+        "apt-get", "install", "-y", "--no-install-recommends",
+        "git", "dpkg-dev", "debhelper", "devscripts",
+        "patch", "quilt", "python3", "curl", "build-essential",
+        "libterm-readline-perl-perl", "libaio-dev", "libblkid-dev",
+        "libkeyutils-dev", "libdistro-info-perl",
+        "liblz4-dev", "libfuse3-dev", "libscrypt-dev", "libsodium-dev",
+        "libudev-dev", "libunwind-dev", "liburcu-dev", "libzstd-dev",
+        "pkgconf", "python3-docutils", "systemd-dev", "uuid-dev",
+        "zlib1g-dev", "locales", "libterm-readline-perl-perl", "dialog","ca-certificates",
+        "libclang-dev", "clang", "llvm",
+        "cargo", "rustc", "libstd-rust-dev", "dh-cargo", "dh-dkms", "jq",
+        "bindgen", "rust-src"  # <-- ADDED missing dependencies
+    ], check=True)
+
+    print("[*] Setting locales...")
+    subprocess.run("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", shell=True, check=True)
+    subprocess.run(["locale-gen"], check=True)
+    
+    os.environ["LANG"] = "en_US.UTF-8"
+    os.environ["LC_ALL"] = "en_US.UTF-8"
+    os.environ["LANGUAGE"] = "en_US:en"
+
+def check_qemu_registration(engine):
+    """Diagnose if QEMU emulation is active on x86_64 hosts for arm32 support."""
+    host_arch = "unknown"
+    try:
+        res = subprocess.run([engine, "info", "--format", "{{.Host.Arch}}"], capture_output=True, text=True)
+        if res.returncode == 0:
+            host_arch = res.stdout.strip()
+    except Exception:
+        pass
+    
+    if host_arch != "unknown" and "arm" not in host_arch and "aarch" not in host_arch:
+        # Host is likely x86_64, check if binfmt_misc has registered qemu-arm
+        qemu_active = os.path.exists("/proc/sys/fs/binfmt_misc/qemu-arm")
+        if not qemu_active:
+            print("[*] Warning: Running ARM32 container on non-ARM host without active 'qemu-user-static'.")
+            print("    Please run the following on your host machine to register ARM binfmt engines:")
+            print("    sudo apt-get install qemu-user-static binfmt-support")
+            print("    - OR -")
+            print("    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes")
+            print()
+
+def main():
+    inside_container = os.environ.get("INSIDE_CONTAINER") == "1"
+
+    if inside_container:
+        install_dependencies()
+        parser = argparse.ArgumentParser()
+        parser.add_argument("target", nargs="?", default="master")
+        args = parser.parse_args()
+        build_inside_container(args.target)
+        sys.exit(0)
+
+    # -------------------------------------------------------------------------
+    # Host Wrapper Command Mode
+    # -------------------------------------------------------------------------
+    parser = argparse.ArgumentParser(description="Unified ARM32 Bcachefs containerized builder.")
+    parser.add_argument("target", nargs="?", default="master", help="Tag/Branch to compile")
+    parser.add_argument("--engine", default="podman", choices=["podman", "docker"], help="Container engine")
+    args = parser.parse_args()
+
+    engine = args.engine
+    if not shutil.which(engine):
+        if engine == "podman" and shutil.which("docker"):
+            print("[*] Podman missing, switching engine to Docker...")
+            engine = "docker"
+        else:
+            print(f"[!] Error: Engine '{engine}' is not installed or available on this host.")
+            sys.exit(1)
+
+    check_qemu_registration(engine)
+
+    script_path = os.path.abspath(__file__)
+    script_name = os.path.basename(script_path)
+    host_cwd = os.getcwd()
+
+    # Orchestrate container execution
+    cmd = [
+        engine, "run", "--rm",
+        "--platform=linux/arm/v7",
+        "-v", f"{host_cwd}:/build",
+        "-e", "INSIDE_CONTAINER=1",
+        "docker.io/arm32v7/debian:trixie",
+        "bash", "-c",
+        f"apt-get update && apt-get install -y python3 && python3 /build/{script_name} {args.target}"
+    ]
+
+    print(f"[*] Launching container build loop using {engine}...")
+    print(f"[*] Mounting directory '{host_cwd}' inside container as /build")
+    
+    env = os.environ.copy()
+    if engine == "podman":
+        # Avoid rootless dbus errors under Podman
+        env["DBUS_SESSION_BUS_ADDRESS"] = ""
+
+    subprocess.run(cmd, env=env, check=True)
 
 if __name__ == "__main__":
     main()
