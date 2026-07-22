@@ -188,9 +188,6 @@ def build_inside_container(target_ref):
     # env["HOSTCC"] = "gcc"
     # env["HOSTCXX"] = "g++"
     
-    existing_rustflags = env.get("RUSTFLAGS", "")
-    env["RUSTFLAGS"] = f"{existing_rustflags} -A unexpected_cfgs -A unused_qualifications".strip() 
-    env["RUST_TARGET"] = "arm-unknown-linux-gnueabi"
     env["BCACHEFS_FUSE"] = "1"
     
     # FIXED: Enforce time alignments for compilers and bindgen parsing
