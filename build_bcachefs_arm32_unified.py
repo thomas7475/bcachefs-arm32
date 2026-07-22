@@ -64,7 +64,7 @@ def configure_debian_metadata(work_dir, version_str):
         # FIXED: Require installable 'rustc' and 'cargo' packages instead of 'rust'
         content = re.sub(
             r'linux-headers-generic.*?linux-headers \(\>= [^\)]+\)',
-            'dkms, rustc, cargo, rust-src, bindgen', content, flags=re.DOTALL
+            'dkms, bindgen', content, flags=re.DOTALL
         )
         if 'libfuse3-dev' not in content:
             content = content.replace('Build-Depends: ', 'Build-Depends: libfuse3-dev, clang, llvm, ')
@@ -228,7 +228,7 @@ def install_dependencies():
         "libudev-dev", "libunwind-dev", "liburcu-dev", "libzstd-dev",
         "pkgconf", "python3-docutils", "systemd-dev", "uuid-dev",
         "zlib1g-dev", "locales", "libterm-readline-perl-perl", "dialog","ca-certificates",
-        "libclang-dev", "clang", "llvm",
+        "libclang-dev", "clang", "llvm", "dialog", "rustfmt",
         "cargo", "rustc", "libstd-rust-dev", "dh-cargo", "dh-dkms", "jq",
         "bindgen", "rust-src"
     ], check=True)
