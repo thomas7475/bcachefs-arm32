@@ -148,7 +148,22 @@ def build_inside_container(target_ref):
         target_ref = f"v{target_ref}"
 
     get_or_clone_repo(target_ref)
-    run_cmd(["git", "checkout", target_ref], cwd=WORK_DIR)
+
+    # -------------------------------------------------------------------------
+    # Version-specific Branch Checkout & Merge Logic
+    # -------------------------------------------------------------------------
+    if target_ref.startswith("v") and not target_ref.endswith("-master"):
+        master_branch = f"{target_ref}-master"
+        armhf_branch = target_ref
+
+        print(f"[*] Checking out base master branch: {master_branch}")
+        run_cmd(["git", "checkout", master_branch], cwd=WORK_DIR)
+
+        print(f"[*] Merging armhf branch/tag '{armhf_branch}' into '{master_branch}'...")
+        run_cmd(["git", "merge", "--no-edit", armhf_branch], cwd=WORK_DIR)
+    else:
+        print(f"[*] Checking out target: {target_ref}")
+        run_cmd(["git", "checkout", target_ref], cwd=WORK_DIR)
 
     result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=WORK_DIR, capture_output=True, text=True)
     commit = result.stdout.strip() if result.returncode == 0 else "unknown"
@@ -159,9 +174,6 @@ def build_inside_container(target_ref):
         latest_tag = tag_res.stdout.strip().lstrip('v') if tag_res.returncode == 0 else "0.0.0"
         clean_version = f"{latest_tag}+{clean_version}"
     version_str = f"{clean_version}.g{commit}"
-
-    # Patches are already integrated in the source; no need to apply them.
-    # apply_quilt_patches and apply_quilt_patches_manually have been removed.
 
     configure_debian_metadata(WORK_DIR, version_str)
     
@@ -180,14 +192,6 @@ def build_inside_container(target_ref):
         del env["OUT_DIR"]
     
     env["DEB_BUILD_OPTIONS"] = "parallel=$(nproc) nocheck nodoc"
-    
-    # FIXED: Revert CC and HOSTCC compilation flags to native system GCC 
-    # REMOVE OR COMMENT OUT THESE OVERRIDES TO PREVENT BINDGEN FROM FAILING:
-    # env["CC"] = "gcc"
-    # env["CXX"] = "g++"
-    # env["HOSTCC"] = "gcc"
-    # env["HOSTCXX"] = "g++"
-    
     env["BCACHEFS_FUSE"] = "1"
     
     # FIXED: Enforce time alignments for compilers and bindgen parsing
