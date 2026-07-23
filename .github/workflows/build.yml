@@ -39,9 +39,7 @@ jobs:
 
       - name: Run the build script
         run: |
-          chmod +x build_bcachefs.sh
-          # Pass the dynamic TARGET_VERSION to the shell script
-          ./build_bcachefs.sh --engine docker "${TARGET_VERSION}"
+          python3 build_bcachefs_arm32_unified.py --engine docker "${TARGET_VERSION}"
 
       - name: Upload .deb artifacts (for debugging)
         uses: actions/upload-artifact@v4
